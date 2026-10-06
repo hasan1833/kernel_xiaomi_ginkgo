@@ -1,0 +1,81 @@
+name: Build Kazuya (modules + KernelSU-Next)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: "16"
+          fetch-depth: 1
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison flex libssl-dev libelf-dev \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi lld llvm \
+            python3 zip git curl cpio
+
+      - name: Get clang
+        run: git clone --depth=1 https://github.com/kdrag0n/proton-clang.git "$HOME/clang"
+
+      - name: Add KernelSU-Next
+        run: |
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/legacy/kernel/setup.sh" | bash -s legacy
+
+      - name: Configure
+        run: |
+          export PATH="$HOME/clang/bin:$PATH"
+          M="make O=out ARCH=arm64 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-"
+          $M vendor/ginkgo-perf_defconfig
+          C=scripts/config
+          $C --file out/.config -e MODULES -e MODULE_UNLOAD -e MODULE_FORCE_LOAD
+          $C --file out/.config -d MODVERSIONS -d MODULE_SIG -d MODULE_SIG_FORCE -d MODULE_SIG_ALL
+          $C --file out/.config -e KSU -e KSU_MANUAL_HOOK -d KPROBES
+          $M olddefconfig
+          grep -E "^CONFIG_(MODULES|MODULE_UNLOAD|MODULE_FORCE_LOAD|KSU|KSU_MANUAL_HOOK|KSU_SUSFS)=" out/.config
+          grep -q "^CONFIG_MODULES=y" out/.config
+          grep -q "^CONFIG_KSU=y" out/.config
+
+      - name: Build
+        run: |
+          export PATH="$HOME/clang/bin:$PATH"
+          make -j"$(nproc)" O=out ARCH=arm64 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- Image.gz-dtb
+
+      - name: Package flashable zip
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ak3
+          rm -rf ak3/.git ak3/.github ak3/README.md
+          cp out/arch/arm64/boot/Image.gz-dtb ak3/
+          cat > ak3/anykernel.sh <<'EOF'
+          properties() { '
+          kernel.string=Kazuya (modules enabled)
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=ginkgo
+          device.name2=willow
+          supported.versions=
+          supported.patchlevels=
+          supported.vendorpatchlevels=
+          '; }
+          BLOCK=/dev/block/bootdevice/by-name/boot;
+          IS_SLOT_DEVICE=0;
+          RAMDISK_COMPRESSION=auto;
+          PATCH_VBMETA_FLAG=auto;
+          . tools/ak3-core.sh;
+          split_boot;
+          flash_boot;
+          EOF
+          sed -i 's/^          //' ak3/anykernel.sh
+          cd ak3 && zip -r9 ../Kazuya-modules-ginkgo.zip . -x "*.git*"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Kazuya-modules-ginkgo
+          path: Kazuya-modules-ginkgo.zip
