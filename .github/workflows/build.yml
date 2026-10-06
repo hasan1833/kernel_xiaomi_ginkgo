@@ -9,6 +9,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          repository: Frenzy169/kernel_xiaomi_ginkgo
           ref: "16"
           fetch-depth: 1
 
