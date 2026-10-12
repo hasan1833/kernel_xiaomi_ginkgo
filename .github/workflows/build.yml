@@ -1,4 +1,4 @@
-name: Build Kazuya (KSU-Next + SuSFS + modules)
+name: Build Kazuya Ginkgo (KSU-Next + SuSFS + modules + kprobes)
 
 on:
   workflow_dispatch:
@@ -6,7 +6,17 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    env:
+      KBUILD_BUILD_USER: Frenzy
+      KBUILD_BUILD_HOST: KazuyaProject
+      DEFCONFIG: vendor/ginkgo-perf_defconfig
     steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          df -h /
+
       - uses: actions/checkout@v4
         with:
           repository: Frenzy169/kernel_xiaomi_ginkgo
@@ -16,82 +26,97 @@ jobs:
       - name: Install build deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc bison flex libssl-dev libelf-dev \
-            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi lld llvm \
-            python3 zip git curl cpio
+          sudo apt-get install -y bc bison flex libssl-dev libelf-dev libncurses-dev \
+            python3 zip git curl cpio lz4 xz-utils
 
-      - name: Get clang
-        run: git clone --depth=1 https://github.com/kdrag0n/proton-clang.git "$HOME/clang"
-
-      - name: Add KernelSU-Next v3.2.0 (legacy + SuSFS v2, pinned)
+      - name: Get toolchains (same as the reference build.sh)
         run: |
-          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/legacy/kernel/setup.sh" | bash -s legacy
-          rm -rf KernelSU-Next
-          git clone --depth=1 -b v3.2.0-legacy-susfs-v2 https://github.com/sidex15/KernelSU-Next.git KernelSU-Next
+          git clone --depth=1 https://gitlab.com/nekoprjkt/aosp-clang "$HOME/toolchain/clang"
+          git clone --depth=1 -b lineage-19.1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git "$HOME/toolchain/gcc64"
+          git clone --depth=1 -b lineage-19.1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git "$HOME/toolchain/gcc32"
+          "$HOME/toolchain/clang/bin/clang" --version | head -1
+
+      - name: Add KernelSU-Next (Frenzy169 legacy-susfs, same as reference)
+        run: |
+          rm -rf KernelSU KernelSU-Next drivers/kernelsu
+          curl -kLSs "https://raw.githubusercontent.com/Frenzy169/KernelSU-Next/legacy-susfs/kernel/setup.sh" | bash -s legacy-susfs
           ls -l drivers/kernelsu
-          grep -n "kernelsu" drivers/Makefile drivers/Kconfig
+          sed -i 's/CONFIG_KSU=n/CONFIG_KSU=y/g' arch/arm64/configs/$DEFCONFIG
+          sed -i 's/CONFIG_KSU_MANUAL_HOOK=n/CONFIG_KSU_MANUAL_HOOK=y/g' arch/arm64/configs/$DEFCONFIG
 
-      - name: Configure
+      - name: Configure (reference defconfig + modules/drivers/kprobes)
         run: |
-          export PATH="$HOME/clang/bin:$PATH"
-          M="make O=out ARCH=arm64 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-"
-          $M vendor/ginkgo-perf_defconfig
-          C=scripts/config
-          # Loadable modules, no signature requirement, no version-CRC check
-          $C --file out/.config -e MODULES -e MODULE_UNLOAD -e MODULE_FORCE_LOAD
-          $C --file out/.config -d MODVERSIONS -d MODULE_SIG -d MODULE_SIG_FORCE -d MODULE_SIG_ALL
-          # KernelSU-Next with manual hooks (already patched into this tree) + SuSFS
-          $C --file out/.config -e KSU -e KSU_MANUAL_HOOK -e KSU_SUSFS -d KPROBES
-          $M olddefconfig
-          grep -E "^CONFIG_(MODULES|MODULE_UNLOAD|MODULE_FORCE_LOAD|KSU|KSU_MANUAL_HOOK|KSU_SUSFS|LOCALVERSION)=" out/.config
-          grep -E "MODULE_SIG|MODVERSIONS" out/.config
-          grep -q "^CONFIG_MODULES=y" out/.config
-          grep -q "^CONFIG_KSU=y" out/.config
-          grep -q "^CONFIG_KSU_SUSFS=y" out/.config
-          ! grep -q "^CONFIG_MODULE_SIG_FORCE=y" out/.config
+          export PATH="$HOME/toolchain/clang/bin:$HOME/toolchain/gcc64/bin:$HOME/toolchain/gcc32/bin:$PATH"
+          export LD_LIBRARY_PATH="$HOME/toolchain/clang/lib:$LD_LIBRARY_PATH"
+          mkdir -p out
+          make O=out ARCH=arm64 $DEFCONFIG
+
+          C="scripts/config --file out/.config"
+
+          # --- loadable kernel modules: no signature, no CRC check, force load/unload ---
+          $C -e MODULES -e MODULE_UNLOAD -e MODULE_FORCE_LOAD -e MODULE_FORCE_UNLOAD
+          $C -d MODVERSIONS -d MODULE_SIG -d MODULE_SIG_FORCE -d MODULE_SIG_ALL
+
+          # --- kprobes / uprobes / tracing (needed by most kernel drivers) ---
+          $C -e KPROBES -e KRETPROBES
+          $C -e FTRACE -e KPROBE_EVENTS -e UPROBES -e UPROBE_EVENTS -e BPF_EVENTS
+
+          # --- kernel symbol + memory access for drivers ---
+          $C -e KALLSYMS -e KALLSYMS_ALL
+          $C -e DEVMEM -d STRICT_DEVMEM -e PROC_KCORE -e DEBUG_FS
+          $C -e IKCONFIG -e IKCONFIG_PROC
+
+          make O=out ARCH=arm64 olddefconfig
+
+          echo "=== resulting config ==="
+          grep -E "^CONFIG_(MODULES|MODULE_UNLOAD|MODULE_FORCE_LOAD|MODULE_FORCE_UNLOAD|KPROBES|KRETPROBES|KPROBE_EVENTS|UPROBES|UPROBE_EVENTS|FTRACE|KALLSYMS_ALL|DEVMEM|PROC_KCORE|DEBUG_FS|KSU|KSU_MANUAL_HOOK|KSU_SUSFS[A-Z_]*|LTO_CLANG)=" out/.config
+          grep -E "MODULE_SIG|MODVERSIONS|STRICT_DEVMEM" out/.config
+
+          # fail early if anything did not stick
+          for o in MODULES MODULE_FORCE_LOAD KPROBES KRETPROBES KPROBE_EVENTS UPROBES KALLSYMS_ALL DEVMEM PROC_KCORE \
+                   KSU KSU_MANUAL_HOOK KSU_SUSFS KSU_SUSFS_SUS_PATH KSU_SUSFS_SUS_MOUNT KSU_SUSFS_SUS_KSTAT \
+                   KSU_SUSFS_TRY_UMOUNT KSU_SUSFS_SPOOF_UNAME KSU_SUSFS_OPEN_REDIRECT KSU_SUSFS_SUS_MAP \
+                   KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG; do
+            grep -q "^CONFIG_$o=y" out/.config || { echo "MISSING CONFIG_$o"; exit 1; }
+          done
+          ! grep -q "^CONFIG_MODULE_SIG=y" out/.config
           ! grep -q "^CONFIG_MODVERSIONS=y" out/.config
 
       - name: Build
         run: |
-          export PATH="$HOME/clang/bin:$PATH"
-          make -j"$(nproc)" O=out ARCH=arm64 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- Image.gz-dtb 2>&1 | tail -n 300
+          export PATH="$HOME/toolchain/clang/bin:$HOME/toolchain/gcc64/bin:$HOME/toolchain/gcc32/bin:$PATH"
+          export LD_LIBRARY_PATH="$HOME/toolchain/clang/lib:$LD_LIBRARY_PATH"
+          make -j"$(nproc --all)" O=out \
+            ARCH=arm64 \
+            CC=clang \
+            LD=ld.lld \
+            AR=llvm-ar \
+            AS=llvm-as \
+            NM=llvm-nm \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            STRIP=llvm-strip \
+            CROSS_COMPILE=aarch64-linux-android- \
+            CROSS_COMPILE_COMPAT=arm-linux-androideabi- \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            Image.gz-dtb \
+            dtbo.img 2>&1 | tail -n 400
           test -f out/arch/arm64/boot/Image.gz-dtb
+          test -f out/arch/arm64/boot/dtbo.img
+          make O=out ARCH=arm64 kernelrelease
 
-      - name: Package flashable zip
+      - name: Package flashable zip (Frenzy169 AnyKernel3, same as reference)
         run: |
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ak3
-          rm -rf ak3/.git ak3/.github ak3/README.md
-          cp out/arch/arm64/boot/Image.gz-dtb ak3/
-          cat > ak3/anykernel.sh <<'EOF'
-          properties() { '
-          kernel.string=Kazuya KSU-Next SuSFS (modules enabled)
-          do.devicecheck=1
-          do.modules=0
-          do.systemless=1
-          do.cleanup=1
-          do.cleanuponabort=0
-          device.name1=ginkgo
-          device.name2=willow
-          supported.versions=
-          supported.patchlevels=
-          supported.vendorpatchlevels=
-          '; }
-          boot_attributes() {
-          set_perm_recursive 0 0 755 644 $RAMDISK/*;
-          set_perm_recursive 0 0 750 750 $RAMDISK/init* $RAMDISK/sbin;
-          }
-          BLOCK=/dev/block/bootdevice/by-name/boot;
-          IS_SLOT_DEVICE=0;
-          RAMDISK_COMPRESSION=auto;
-          PATCH_VBMETA_FLAG=auto;
-          . tools/ak3-core.sh;
-          split_boot;
-          flash_boot;
-          EOF
-          sed -i 's/^          //' ak3/anykernel.sh
-          cd ak3 && zip -r9 ../Kazuya-KSUN-SuSFS-modules-ginkgo.zip . -x "*.git*"
+          git clone -q https://github.com/Frenzy169/AnyKernel3 AnyKernel3
+          cp out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
+          cp out/arch/arm64/boot/dtbo.img AnyKernel3/
+          cd AnyKernel3
+          git checkout master &> /dev/null
+          ZIPNAME="Kazuya-Ginkgo-KSUNext-Modules-$(TZ=Asia/Jakarta date +"%Y%m%d-%H%M").zip"
+          zip -r9 "../$ZIPNAME" * -x '*.git*' README.md *placeholder
+          echo "ZIPNAME=$ZIPNAME" >> "$GITHUB_ENV"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Kazuya-KSUN-SuSFS-modules-ginkgo
-          path: Kazuya-KSUN-SuSFS-modules-ginkgo.zip
+          name: Kazuya-Ginkgo-KSUNext-Modules
+          path: ${{ env.ZIPNAME }}
