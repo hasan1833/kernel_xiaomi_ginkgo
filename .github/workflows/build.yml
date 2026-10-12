@@ -24,8 +24,13 @@ jobs:
       - name: Free disk and add swap
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
-          sudo fallocate -l 8G /swapfile && sudo chmod 600 /swapfile
-          sudo mkswap /swapfile && sudo swapon /swapfile
+          sudo swapoff -a || true
+          sudo rm -f /swapfile || true
+          sudo fallocate -l 8G /mnt/kswap || sudo dd if=/dev/zero of=/mnt/kswap bs=1M count=8192
+          sudo chmod 600 /mnt/kswap
+          sudo mkswap /mnt/kswap
+          sudo swapon /mnt/kswap || true
+          free -m
 
       - name: Install build deps
         run: |
@@ -109,3 +114,11 @@ jobs:
             Kazuya-Ginkgo-${{ matrix.variant }}.zip
             config.after
             build.log
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: FAILED-${{ matrix.variant }}-log
+          path: |
+            build.log
+            config.after
