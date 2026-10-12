@@ -5,7 +5,7 @@ on:
 
 jobs:
   build:
-    runs-runs-on: ubuntu-22.04
+    runs-on: ubuntu-22.04
     timeout-minutes: 240
     defaults:
       run:
@@ -158,3 +158,4 @@ jobs:
             out/.config
             out/build.log
           if-no-files-found: ignore
+          
