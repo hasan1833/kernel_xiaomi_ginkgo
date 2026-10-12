@@ -1,4 +1,4 @@
-name: Build Kazuya (modules + KernelSU-Next)
+name: Build Kazuya (KSU-Next + SuSFS + modules)
 
 on:
   workflow_dispatch:
@@ -23,10 +23,13 @@ jobs:
       - name: Get clang
         run: git clone --depth=1 https://github.com/kdrag0n/proton-clang.git "$HOME/clang"
 
-      - name: Add KernelSU-Next
+      - name: Add KernelSU-Next (SuSFS v2 branch)
         run: |
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/legacy/kernel/setup.sh" | bash -s legacy
-          rm -rf KernelSU-Next && git clone --depth=1 -b legacy-susfs-v2 https://github.com/sidex15/KernelSU-Next.git KernelSU-Next
+          rm -rf KernelSU-Next
+          git clone --depth=1 -b legacy-susfs-v2 https://github.com/sidex15/KernelSU-Next.git KernelSU-Next
+          ls -l drivers/kernelsu
+          grep -n "kernelsu" drivers/Makefile drivers/Kconfig
 
       - name: Configure
         run: |
@@ -34,18 +37,25 @@ jobs:
           M="make O=out ARCH=arm64 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-"
           $M vendor/ginkgo-perf_defconfig
           C=scripts/config
+          # Loadable modules, no signature requirement, no version-CRC check
           $C --file out/.config -e MODULES -e MODULE_UNLOAD -e MODULE_FORCE_LOAD
           $C --file out/.config -d MODVERSIONS -d MODULE_SIG -d MODULE_SIG_FORCE -d MODULE_SIG_ALL
-          $C --file out/.config -e KSU -e KSU_MANUAL_HOOK -d KPROBES
+          # KernelSU-Next with manual hooks (already patched into this tree) + SuSFS
+          $C --file out/.config -e KSU -e KSU_MANUAL_HOOK -e KSU_SUSFS -d KPROBES
           $M olddefconfig
-          grep -E "^CONFIG_(MODULES|MODULE_UNLOAD|MODULE_FORCE_LOAD|KSU|KSU_MANUAL_HOOK|KSU_SUSFS)=" out/.config
+          grep -E "^CONFIG_(MODULES|MODULE_UNLOAD|MODULE_FORCE_LOAD|KSU|KSU_MANUAL_HOOK|KSU_SUSFS|LOCALVERSION)=" out/.config
+          grep -E "MODULE_SIG|MODVERSIONS" out/.config
           grep -q "^CONFIG_MODULES=y" out/.config
           grep -q "^CONFIG_KSU=y" out/.config
+          grep -q "^CONFIG_KSU_SUSFS=y" out/.config
+          ! grep -q "^CONFIG_MODULE_SIG_FORCE=y" out/.config
+          ! grep -q "^CONFIG_MODVERSIONS=y" out/.config
 
       - name: Build
         run: |
           export PATH="$HOME/clang/bin:$PATH"
-          make -j"$(nproc)" O=out ARCH=arm64 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- Image.gz-dtb
+          make -j"$(nproc)" O=out ARCH=arm64 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- Image.gz-dtb 2>&1 | tail -n 300
+          test -f out/arch/arm64/boot/Image.gz-dtb
 
       - name: Package flashable zip
         run: |
@@ -54,7 +64,7 @@ jobs:
           cp out/arch/arm64/boot/Image.gz-dtb ak3/
           cat > ak3/anykernel.sh <<'EOF'
           properties() { '
-          kernel.string=Kazuya (modules enabled)
+          kernel.string=Kazuya KSU-Next SuSFS (modules enabled)
           do.devicecheck=1
           do.modules=0
           do.systemless=1
@@ -66,6 +76,10 @@ jobs:
           supported.patchlevels=
           supported.vendorpatchlevels=
           '; }
+          boot_attributes() {
+          set_perm_recursive 0 0 755 644 $RAMDISK/*;
+          set_perm_recursive 0 0 750 750 $RAMDISK/init* $RAMDISK/sbin;
+          }
           BLOCK=/dev/block/bootdevice/by-name/boot;
           IS_SLOT_DEVICE=0;
           RAMDISK_COMPRESSION=auto;
@@ -75,9 +89,9 @@ jobs:
           flash_boot;
           EOF
           sed -i 's/^          //' ak3/anykernel.sh
-          cd ak3 && zip -r9 ../Kazuya-modules-ginkgo.zip . -x "*.git*"
+          cd ak3 && zip -r9 ../Kazuya-KSUN-SuSFS-modules-ginkgo.zip . -x "*.git*"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Kazuya-modules-ginkgo
-          path: Kazuya-modules-ginkgo.zip
+          name: Kazuya-KSUN-SuSFS-modules-ginkgo
+          path: Kazuya-KSUN-SuSFS-modules-ginkgo.zip
