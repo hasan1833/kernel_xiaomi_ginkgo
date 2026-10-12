@@ -41,15 +41,16 @@ jobs:
           # Loadable modules, no signature requirement, no version-CRC check
           $C --file out/.config -e MODULES -e MODULE_UNLOAD -e MODULE_FORCE_LOAD
           $C --file out/.config -d MODVERSIONS -d MODULE_SIG -d MODULE_SIG_FORCE -d MODULE_SIG_ALL
-          # kprobes (KALLSYMS_ALL needs DEBUG_KERNEL first)
-          $C --file out/.config -e DEBUG_KERNEL
-          $C --file out/.config -e KALLSYMS -e KALLSYMS_ALL
+          # kprobes (only needs KALLSYMS; DEBUG_KERNEL/KALLSYMS_ALL removed - they broke msm_vidc linking)
+          $C --file out/.config -e KALLSYMS
           $C --file out/.config -e KPROBES -e KRETPROBES
+          # vidc debug code needs debugfs
+          $C --file out/.config -e DEBUG_FS
           # KernelSU-Next stays on manual hooks (already patched into this tree) + SuSFS
           $C --file out/.config -e KSU -e KSU_MANUAL_HOOK -e KSU_SUSFS -d KSU_KPROBES_HOOK
           $M olddefconfig
-          grep -E "^CONFIG_(MODULES|MODULE_UNLOAD|MODULE_FORCE_LOAD|KPROBES|KRETPROBES|KALLSYMS|KALLSYMS_ALL|DEBUG_KERNEL|KSU|KSU_MANUAL_HOOK|KSU_KPROBES_HOOK|KSU_SUSFS|LOCALVERSION)=" out/.config
-          grep -E "MODULE_SIG|MODVERSIONS" out/.config
+          grep -E "^CONFIG_(MODULES|MODULE_UNLOAD|MODULE_FORCE_LOAD|KPROBES|KRETPROBES|KALLSYMS|DEBUG_FS|DEBUG_KERNEL|KSU|KSU_MANUAL_HOOK|KSU_KPROBES_HOOK|KSU_SUSFS|LOCALVERSION)=" out/.config || true
+          grep -E "MODULE_SIG|MODVERSIONS" out/.config || true
           grep -q "^CONFIG_MODULES=y" out/.config
           grep -q "^CONFIG_KPROBES=y" out/.config
           grep -q "^CONFIG_KRETPROBES=y" out/.config
@@ -58,6 +59,11 @@ jobs:
           grep -q "^CONFIG_KSU_SUSFS=y" out/.config
           ! grep -q "^CONFIG_MODULE_SIG_FORCE=y" out/.config
           ! grep -q "^CONFIG_MODVERSIONS=y" out/.config
+
+      - name: Diagnose vidc config
+        run: |
+          grep -iE "VIDC|DEBUG_FS|DEBUG_KERNEL" out/.config || true
+          find . -path ./out -prune -o -name "msm_vidc_debug*" -print || true
 
       - name: Build
         run: |
