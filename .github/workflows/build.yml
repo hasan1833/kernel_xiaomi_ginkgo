@@ -23,11 +23,11 @@ jobs:
       - name: Get clang
         run: git clone --depth=1 https://github.com/kdrag0n/proton-clang.git "$HOME/clang"
 
-      - name: Add KernelSU-Next (SuSFS v2 branch)
+      - name: Add KernelSU-Next v3.2.0 (legacy + SuSFS v2, pinned)
         run: |
           curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/legacy/kernel/setup.sh" | bash -s legacy
           rm -rf KernelSU-Next
-          git clone --depth=1 -b legacy-susfs-v2 https://github.com/sidex15/KernelSU-Next.git KernelSU-Next
+          git clone --depth=1 -b v3.2.0-legacy-susfs-v2 https://github.com/sidex15/KernelSU-Next.git KernelSU-Next
           ls -l drivers/kernelsu
           grep -n "kernelsu" drivers/Makefile drivers/Kconfig
 
