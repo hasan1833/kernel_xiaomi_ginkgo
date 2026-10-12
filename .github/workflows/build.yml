@@ -6,7 +6,10 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 180
+    timeout-minutes: 240
+    defaults:
+      run:
+        shell: bash   # = bash -eo pipefail, so a failing `make | tee` really fails the step
     env:
       KBUILD_BUILD_USER: Frenzy
       KBUILD_BUILD_HOST: KazuyaProject
@@ -53,6 +56,12 @@ jobs:
 
           C="scripts/config --file out/.config"
 
+          # --- FIX: KALLSYMS_ALL "depends on DEBUG_KERNEL && KALLSYMS".
+          # The defconfig has "# CONFIG_DEBUG_KERNEL is not set", so olddefconfig silently
+          # dropped KALLSYMS_ALL. DEBUG_KERNEL has to be turned on first. ---
+          $C -e DEBUG_KERNEL
+          $C -e KALLSYMS -e KALLSYMS_ALL
+
           # --- loadable kernel modules: no signature, no CRC check, force load/unload ---
           $C -e MODULES -e MODULE_UNLOAD -e MODULE_FORCE_LOAD -e MODULE_FORCE_UNLOAD
           $C -d MODVERSIONS -d MODULE_SIG -d MODULE_SIG_FORCE -d MODULE_SIG_ALL
@@ -61,26 +70,29 @@ jobs:
           $C -e KPROBES -e KRETPROBES
           $C -e FTRACE -e KPROBE_EVENTS -e UPROBES -e UPROBE_EVENTS -e BPF_EVENTS
 
-          # --- kernel symbol + memory access for drivers ---
-          $C -e KALLSYMS -e KALLSYMS_ALL
+          # --- memory access for drivers ---
           $C -e DEVMEM -d STRICT_DEVMEM -e PROC_KCORE -e DEBUG_FS
           $C -e IKCONFIG -e IKCONFIG_PROC
 
           make O=out ARCH=arm64 olddefconfig
 
           echo "=== resulting config ==="
-          grep -E "^CONFIG_(MODULES|MODULE_UNLOAD|MODULE_FORCE_LOAD|MODULE_FORCE_UNLOAD|KPROBES|KRETPROBES|KPROBE_EVENTS|UPROBES|UPROBE_EVENTS|FTRACE|KALLSYMS_ALL|DEVMEM|PROC_KCORE|DEBUG_FS|KSU|KSU_MANUAL_HOOK|KSU_SUSFS[A-Z_]*|LTO_CLANG)=" out/.config
-          grep -E "MODULE_SIG|MODVERSIONS|STRICT_DEVMEM" out/.config
+          grep -E "^CONFIG_(DEBUG_KERNEL|KALLSYMS|KALLSYMS_ALL|MODULES|MODULE_UNLOAD|MODULE_FORCE_LOAD|MODULE_FORCE_UNLOAD|KPROBES|KRETPROBES|KPROBE_EVENTS|UPROBES|UPROBE_EVENTS|FTRACE|DEVMEM|PROC_KCORE|DEBUG_FS|KSU|KSU_MANUAL_HOOK|KSU_SUSFS[A-Z_]*|LTO_CLANG)=" out/.config || true
+          grep -E "MODULE_SIG|MODVERSIONS|STRICT_DEVMEM" out/.config || true
 
-          # fail early if anything did not stick
-          for o in MODULES MODULE_FORCE_LOAD KPROBES KRETPROBES KPROBE_EVENTS UPROBES KALLSYMS_ALL DEVMEM PROC_KCORE \
+          # fail early (and list EVERYTHING that is missing, not just the first one)
+          missing=0
+          for o in DEBUG_KERNEL KALLSYMS KALLSYMS_ALL MODULES MODULE_UNLOAD MODULE_FORCE_LOAD MODULE_FORCE_UNLOAD \
+                   KPROBES KRETPROBES KPROBE_EVENTS UPROBES UPROBE_EVENTS DEVMEM PROC_KCORE DEBUG_FS \
                    KSU KSU_MANUAL_HOOK KSU_SUSFS KSU_SUSFS_SUS_PATH KSU_SUSFS_SUS_MOUNT KSU_SUSFS_SUS_KSTAT \
                    KSU_SUSFS_TRY_UMOUNT KSU_SUSFS_SPOOF_UNAME KSU_SUSFS_OPEN_REDIRECT KSU_SUSFS_SUS_MAP \
                    KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG; do
-            grep -q "^CONFIG_$o=y" out/.config || { echo "MISSING CONFIG_$o"; exit 1; }
+            grep -q "^CONFIG_$o=y" out/.config || { echo "MISSING CONFIG_$o"; missing=1; }
           done
-          ! grep -q "^CONFIG_MODULE_SIG=y" out/.config
-          ! grep -q "^CONFIG_MODVERSIONS=y" out/.config
+          for o in MODULE_SIG MODULE_SIG_FORCE MODVERSIONS STRICT_DEVMEM; do
+            if grep -q "^CONFIG_$o=y" out/.config; then echo "SHOULD BE OFF: CONFIG_$o"; missing=1; fi
+          done
+          exit $missing
 
       - name: Build
         run: |
@@ -100,10 +112,10 @@ jobs:
             CROSS_COMPILE_COMPAT=arm-linux-androideabi- \
             CLANG_TRIPLE=aarch64-linux-gnu- \
             Image.gz-dtb \
-            dtbo.img 2>&1 | tail -n 400
+            dtbo.img 2>&1 | tee out/build.log | tail -n 400
           test -f out/arch/arm64/boot/Image.gz-dtb
           test -f out/arch/arm64/boot/dtbo.img
-          make O=out ARCH=arm64 kernelrelease
+          make O=out ARCH=arm64 kernelrelease | tee out/kernelrelease.txt
 
       - name: Package flashable zip (Frenzy169 AnyKernel3, same as reference)
         run: |
@@ -116,7 +128,30 @@ jobs:
           zip -r9 "../$ZIPNAME" * -x '*.git*' README.md *placeholder
           echo "ZIPNAME=$ZIPNAME" >> "$GITHUB_ENV"
 
+      - name: Collect module-build files (config, Module.symvers, release)
+        run: |
+          # Needed to compile your own .ko against exactly this kernel
+          mkdir -p modbuild
+          cp out/.config modbuild/config
+          cp out/Module.symvers modbuild/ 2>/dev/null || true
+          cp out/kernelrelease.txt modbuild/
+
       - uses: actions/upload-artifact@v4
         with:
           name: Kazuya-Ginkgo-KSUNext-Modules
           path: ${{ env.ZIPNAME }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: module-build-files
+          path: modbuild/
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-debug
+          path: |
+            out/.config
+            out/build.log
+          if-no-files-found: ignore
