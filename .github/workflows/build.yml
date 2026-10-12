@@ -1,9 +1,10 @@
-name: Build ginkgo kernel (bisect)
+name: Build ginkgo kernel (kprobes bisect)
 
-# Builds 3 zips: flash in order 1 -> 2 -> 3. First one that bootloops is the culprit.
-#   1-baseline        = untouched kernel (must boot)
-#   2-modules         = + MODULES, MODULE_UNLOAD, UNUSED_SYMBOLS, no MODULE_SIG/FORCE/TRIM/LOCKDOWN
-#   3-modules-kprobes = + KPROBES
+# Known: 1-baseline and 2-modules boot. 3-modules-kprobes bootloops.
+# All variants below have MODULES + KPROBES on. Flash and see which boot:
+#   4-kprobes-ksu-patched : KernelSU-Next's own kprobe code (selinux_hide) disabled
+#   5-kprobes-nolto       : full LTO off
+#   6-kprobes-noksu       : KernelSU off (tests plain kprobes only)
 
 on:
   workflow_dispatch:
@@ -19,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [1-baseline, 2-modules, 3-modules-kprobes]
+        variant: [4-kprobes-ksu-patched, 5-kprobes-nolto, 6-kprobes-noksu]
     steps:
       - name: Free disk and add swap
         run: |
@@ -65,6 +66,15 @@ jobs:
           D=arch/arm64/configs/${DEFCONFIG}
           sed -i 's/CONFIG_KSU=n/CONFIG_KSU=y/; s/CONFIG_KSU_MANUAL_HOOK=n/CONFIG_KSU_MANUAL_HOOK=y/' $D
 
+      - name: Patch KernelSU-Next kprobe use (variant 4 only)
+        if: matrix.variant == '4-kprobes-ksu-patched'
+        working-directory: kernel
+        run: |
+          F=KernelSU-Next/kernel/feature/selinux_hide.c
+          grep -n "CONFIG_KPROBES" $F
+          sed -i 's/#if defined(CONFIG_KPROBES)/#if 0 \/* kprobes disabled *\//' $F
+          echo "--- after:"; grep -n "CONFIG_KPROBES\|#if 0" $F
+
       - name: Configure (${{ matrix.variant }})
         working-directory: kernel
         run: |
@@ -76,19 +86,19 @@ jobs:
           mkdir -p out
           $MK $DEFCONFIG
           cp out/.config ../config.before
+          scripts/config --file out/.config \
+            -e MODULES -e MODULE_UNLOAD -e UNUSED_SYMBOLS -e KPROBES \
+            -d MODULE_SIG -d MODULE_SIG_FORCE -d TRIM_UNUSED_KSYMS -d SECURITY_LOCKDOWN_LSM
           case "${{ matrix.variant }}" in
-            2-modules|3-modules-kprobes)
-              scripts/config --file out/.config \
-                -e MODULES -e MODULE_UNLOAD -e UNUSED_SYMBOLS \
-                -d MODULE_SIG -d MODULE_SIG_FORCE -d TRIM_UNUSED_KSYMS -d SECURITY_LOCKDOWN_LSM
-              ;;
+            5-kprobes-nolto)
+              scripts/config --file out/.config -d LTO_CLANG -e LTO_NONE -d LTO ;;
+            6-kprobes-noksu)
+              scripts/config --file out/.config -d KSU ;;
           esac
-          if [ "${{ matrix.variant }}" = "3-modules-kprobes" ]; then
-            scripts/config --file out/.config -e KPROBES
-          fi
           $MK olddefconfig
           cp out/.config ../config.after
           diff <(grep -v '^#' ../config.before | sort) <(grep -v '^#' out/.config | sort) || true
+          grep -E "^(# )?CONFIG_(KPROBES|KSU|LTO|LTO_CLANG)[ =]" out/.config
 
       - name: Build
         working-directory: kernel
