@@ -5,7 +5,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-runs-on: ubuntu-22.04
     timeout-minutes: 240
     defaults:
       run:
@@ -34,45 +34,50 @@ jobs:
 
       - name: Get toolchains (same as the reference build.sh)
         run: |
-          git clone --depth=1 https://gitlab.com/nekoprjkt/aosp-clang "$HOME/toolchain/clang"
-          git clone --depth=1 -b lineage-19.1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git "$HOME/toolchain/gcc64"
-          git clone --depth=1 -b lineage-19.1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git "$HOME/toolchain/gcc32"
-          "$HOME/toolchain/clang/bin/clang" --version | head -1
+          git clone --depth=1 https://gitlab.com "\$HOME/toolchain/clang"
+          git clone --depth=1 -b lineage-19.1 https://github.com "\$HOME/toolchain/gcc64"
+          git clone --depth=1 -b lineage-19.1 https://github.com "\$HOME/toolchain/gcc32"
+          "\$HOME/toolchain/clang/bin/clang" --version | head -1
 
       - name: Add KernelSU-Next (Frenzy169 legacy-susfs, same as reference)
         run: |
           rm -rf KernelSU KernelSU-Next drivers/kernelsu
-          curl -kLSs "https://raw.githubusercontent.com/Frenzy169/KernelSU-Next/legacy-susfs/kernel/setup.sh" | bash -s legacy-susfs
+          curl -kLSs "https://githubusercontent.com" | bash -s legacy-susfs
           ls -l drivers/kernelsu
-          sed -i 's/CONFIG_KSU=n/CONFIG_KSU=y/g' arch/arm64/configs/$DEFCONFIG
-          sed -i 's/CONFIG_KSU_MANUAL_HOOK=n/CONFIG_KSU_MANUAL_HOOK=y/g' arch/arm64/configs/$DEFCONFIG
+          sed -i 's/CONFIG_KSU=n/CONFIG_KSU=y/g' arch/arm64/configs/\$DEFCONFIG
+          sed -i 's/CONFIG_KSU_MANUAL_HOOK=n/CONFIG_KSU_MANUAL_HOOK=y/g' arch/arm64/configs/\$DEFCONFIG
+
+      - name: Patch MSM display driver (needed because DEBUG_FS is on)
+        run: |
+          # sde_dbg_evtlog.o is only built with CONFIG_DEBUG_FS. The driver replaces all
+          # tracepoints with empty stubs but forgot trace_sde_evtlog -> implicit declaration error.
+          F=drivers/gpu/drm/msm/sde/sde_trace.h
+          grep -q "define trace_sde_evtlog" \$F || \
+            sed -i 's|^#define trace_sde_perf_set_qos_luts(...) {}|&\n#define trace_sde_evtlog(...) {}|' \$F
+          grep -n "trace_sde_evtlog" \$F
 
       - name: Configure (reference defconfig + modules/drivers/kprobes)
         run: |
-          export PATH="$HOME/toolchain/clang/bin:$HOME/toolchain/gcc64/bin:$HOME/toolchain/gcc32/bin:$PATH"
-          export LD_LIBRARY_PATH="$HOME/toolchain/clang/lib:$LD_LIBRARY_PATH"
+          export PATH="HOME/toolchain/clang/bin:HOME/toolchain/gcc64/bin:HOME/toolchain/gcc32/bin:PATH"
+          export LD_LIBRARY_PATH="HOME/toolchain/clang/lib:LD_LIBRARY_PATH"
           mkdir -p out
-          make O=out ARCH=arm64 $DEFCONFIG
+          make O=out ARCH=arm64 \$DEFCONFIG
 
           C="scripts/config --file out/.config"
 
           # --- FIX: KALLSYMS_ALL "depends on DEBUG_KERNEL && KALLSYMS".
           # The defconfig has "# CONFIG_DEBUG_KERNEL is not set", so olddefconfig silently
           # dropped KALLSYMS_ALL. DEBUG_KERNEL has to be turned on first. ---
-          $C -e DEBUG_KERNEL
-          $C -e KALLSYMS -e KALLSYMS_ALL
+          \(C -e DEBUG_KERNEL\)C -e KALLSYMS -e KALLSYMS_ALL
 
           # --- loadable kernel modules: no signature, no CRC check, force load/unload ---
-          $C -e MODULES -e MODULE_UNLOAD -e MODULE_FORCE_LOAD -e MODULE_FORCE_UNLOAD
-          $C -d MODVERSIONS -d MODULE_SIG -d MODULE_SIG_FORCE -d MODULE_SIG_ALL
+          \(C -e MODULES -e MODULE_UNLOAD -e MODULE_FORCE_LOAD -e MODULE_FORCE_UNLOAD\)C -d MODVERSIONS -d MODULE_SIG -d MODULE_SIG_FORCE -d MODULE_SIG_ALL
 
           # --- kprobes / uprobes / tracing (needed by most kernel drivers) ---
-          $C -e KPROBES -e KRETPROBES
-          $C -e FTRACE -e KPROBE_EVENTS -e UPROBES -e UPROBE_EVENTS -e BPF_EVENTS
+          \(C -e KPROBES -e KRETPROBES\)C -e FTRACE -e KPROBE_EVENTS -e UPROBES -e UPROBE_EVENTS -e BPF_EVENTS
 
           # --- memory access for drivers ---
-          $C -e DEVMEM -d STRICT_DEVMEM -e PROC_KCORE -e DEBUG_FS
-          $C -e IKCONFIG -e IKCONFIG_PROC
+          \(C -e DEVMEM -d STRICT_DEVMEM -e PROC_KCORE -e DEBUG_FS\)C -e IKCONFIG -e IKCONFIG_PROC
 
           make O=out ARCH=arm64 olddefconfig
 
@@ -87,46 +92,44 @@ jobs:
                    KSU KSU_MANUAL_HOOK KSU_SUSFS KSU_SUSFS_SUS_PATH KSU_SUSFS_SUS_MOUNT KSU_SUSFS_SUS_KSTAT \
                    KSU_SUSFS_TRY_UMOUNT KSU_SUSFS_SPOOF_UNAME KSU_SUSFS_OPEN_REDIRECT KSU_SUSFS_SUS_MAP \
                    KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG; do
-            grep -q "^CONFIG_$o=y" out/.config || { echo "MISSING CONFIG_$o"; missing=1; }
+            grep -q "^CONFIG_\$o=y" out/.config || { echo "MISSING CONFIG_\$o"; missing=1; }
           done
           for o in MODULE_SIG MODULE_SIG_FORCE MODVERSIONS STRICT_DEVMEM; do
-            if grep -q "^CONFIG_$o=y" out/.config; then echo "SHOULD BE OFF: CONFIG_$o"; missing=1; fi
+            if grep -q "^CONFIG_\$o=y" out/.config; then echo "SHOULD BE OFF: CONFIG_\$o"; missing=1; fi
           done
-          exit $missing
+          exit \$missing
 
       - name: Build
         run: |
-          export PATH="$HOME/toolchain/clang/bin:$HOME/toolchain/gcc64/bin:$HOME/toolchain/gcc32/bin:$PATH"
-          export LD_LIBRARY_PATH="$HOME/toolchain/clang/lib:$LD_LIBRARY_PATH"
-          make -j"$(nproc --all)" O=out \
-            ARCH=arm64 \
-            CC=clang \
-            LD=ld.lld \
-            AR=llvm-ar \
-            AS=llvm-as \
-            NM=llvm-nm \
-            OBJCOPY=llvm-objcopy \
-            OBJDUMP=llvm-objdump \
-            STRIP=llvm-strip \
-            CROSS_COMPILE=aarch64-linux-android- \
-            CROSS_COMPILE_COMPAT=arm-linux-androideabi- \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            Image.gz-dtb \
-            dtbo.img 2>&1 | tee out/build.log | tail -n 400
+          export PATH="HOME/toolchain/clang/bin:HOME/toolchain/gcc64/bin:HOME/toolchain/gcc32/bin:PATH"
+          export LD_LIBRARY_PATH="HOME/toolchain/clang/lib:LD_LIBRARY_PATH"
+          MK=(make O=out ARCH=arm64 CC=clang LD=ld.lld AR=llvm-ar AS=llvm-as NM=llvm-nm
+              OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
+              CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_COMPAT=arm-linux-androideabi-
+              CLANG_TRIPLE=aarch64-linux-gnu-)
+
+          if ! "\({MK[@]}" -j"\)(nproc --all)" Image.gz-dtb dtbo.img > out/build.log 2>&1; then
+            echo "################ BUILD FAILED - first real errors ################"
+            grep -n -E "error:|undefined (reference|symbol)|fatal error|\*\*\* \[" out/build.log | head -40 || true
+            echo "################ re-running single-threaded to get a clean error ################"
+            "\${MK[@]}" -j1 Image.gz-dtb dtbo.img 2>&1 | tail -n 60 || true
+            exit 1
+          fi
+          tail -n 30 out/build.log
           test -f out/arch/arm64/boot/Image.gz-dtb
           test -f out/arch/arm64/boot/dtbo.img
           make O=out ARCH=arm64 kernelrelease | tee out/kernelrelease.txt
 
       - name: Package flashable zip (Frenzy169 AnyKernel3, same as reference)
         run: |
-          git clone -q https://github.com/Frenzy169/AnyKernel3 AnyKernel3
+          git clone -q https://github.com AnyKernel3
           cp out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
           cp out/arch/arm64/boot/dtbo.img AnyKernel3/
           cd AnyKernel3
           git checkout master &> /dev/null
-          ZIPNAME="Kazuya-Ginkgo-KSUNext-Modules-$(TZ=Asia/Jakarta date +"%Y%m%d-%H%M").zip"
-          zip -r9 "../$ZIPNAME" * -x '*.git*' README.md *placeholder
-          echo "ZIPNAME=$ZIPNAME" >> "$GITHUB_ENV"
+          ZIPNAME="Kazuya-Ginkgo-KSUNext-Modules-\$(TZ=Asia/Jakarta date +"%Y%m%d-%H%M").zip"
+          zip -r9 "../\$ZIPNAME" * -x '*.git*' README.md *placeholder
+          echo "ZIPNAME=ZIPNAME" >> "GITHUB_ENV"
 
       - name: Collect module-build files (config, Module.symvers, release)
         run: |
@@ -139,7 +142,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: Kazuya-Ginkgo-KSUNext-Modules
-          path: ${{ env.ZIPNAME }}
+          path: \${{ env.ZIPNAME }}
 
       - uses: actions/upload-artifact@v4
         with:
