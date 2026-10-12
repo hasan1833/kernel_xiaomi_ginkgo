@@ -1,113 +1,111 @@
-name: Build Kazuya (KSU-Next + SuSFS + modules + kprobes)
+name: Build ginkgo kernel (bisect)
+
+# Builds 3 zips: flash in order 1 -> 2 -> 3. First one that bootloops is the culprit.
+#   1-baseline        = untouched kernel (must boot)
+#   2-modules         = + MODULES, MODULE_UNLOAD, UNUSED_SYMBOLS, no MODULE_SIG/FORCE/TRIM/LOCKDOWN
+#   3-modules-kprobes = + KPROBES
 
 on:
   workflow_dispatch:
-    inputs:
-      modules:
-        description: "Enable loadable kernel modules (no signature/version checks)"
-        type: boolean
-        default: true
-      kprobes:
-        description: "Enable kprobes/kretprobes"
-        type: boolean
-        default: true
+
+env:
+  KERNEL_REPO: Frenzy169/kernel_xiaomi_ginkgo
+  KERNEL_REF: 9cdf251be3de2ec02ef8b5239fbc048962174e7b
+  DEFCONFIG: vendor/ginkgo-perf_defconfig
 
 jobs:
   build:
     runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [1-baseline, 2-modules, 3-modules-kprobes]
     steps:
-      - uses: actions/checkout@v4
-        with:
-          repository: Frenzy169/kernel_xiaomi_ginkgo
-          ref: "16"
-          fetch-depth: 1
+      - name: Free disk and add swap
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
+          sudo fallocate -l 8G /swapfile && sudo chmod 600 /swapfile
+          sudo mkswap /swapfile && sudo swapon /swapfile
 
       - name: Install build deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc bison flex libssl-dev libelf-dev \
-            lld llvm python3 zip git curl cpio device-tree-compiler \
-            libncurses-dev xz-utils
+          sudo apt-get install -y bc bison flex libssl-dev libelf-dev lz4 zip \
+            device-tree-compiler python3 cpio libncurses-dev
 
-      # Same toolchain set the Kazuya author uses in his own build.sh
-      - name: Get toolchains
+      - name: Checkout kernel source
         run: |
-          git clone --depth=1 https://gitlab.com/nekoprjkt/aosp-clang "$HOME/clang"
-          git clone --depth=1 -b lineage-19.1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git "$HOME/gcc64"
-          git clone --depth=1 -b lineage-19.1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git "$HOME/gcc32"
-          export PATH="$HOME/clang/bin:$PATH"
-          clang --version | head -1
+          git clone --no-checkout https://github.com/${KERNEL_REPO} kernel
+          cd kernel
+          git fetch --depth=1 origin ${KERNEL_REF}
+          git checkout FETCH_HEAD
 
-      # Same KernelSU-Next the Kazuya author ships (legacy-susfs, manual hooks)
-      - name: Add KernelSU-Next (Frenzy169 legacy-susfs)
+      - name: Fetch toolchains
         run: |
-          rm -rf KernelSU KernelSU-Next drivers/kernelsu
-          curl -LSs "https://raw.githubusercontent.com/Frenzy169/KernelSU-Next/legacy-susfs/kernel/setup.sh" | bash -s legacy-susfs
-          ls -l drivers/kernelsu
-          grep -n "kernelsu" drivers/Makefile drivers/Kconfig
+          mkdir -p toolchain && cd toolchain
+          git clone --depth=1 https://gitlab.com/nekoprjkt/aosp-clang clang
+          git clone --depth=1 -b lineage-19.1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git aarch64-linux-android-4.9
+          git clone --depth=1 -b lineage-19.1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git arm-linux-androideabi-4.9
+          ln -sf arm-linux-androideabi-ld arm-linux-androideabi-4.9/bin/arm-linux-gnueabi-ld
+          ln -sf arm-linux-androideabi-ld arm-linux-androideabi-4.9/bin/arm-linux-gnueabihf-ld
+          ./clang/bin/clang --version | head -1
 
-      - name: Configure
+      - name: Add KernelSU-Next
+        working-directory: kernel
         run: |
-          export PATH="$HOME/clang/bin:$HOME/gcc64/bin:$HOME/gcc32/bin:$PATH"
-          export LD_LIBRARY_PATH="$HOME/clang/lib:$LD_LIBRARY_PATH"
-          export KBUILD_BUILD_USER="Frenzy"
-          export KBUILD_BUILD_HOST="KazuyaProject"
-          M="make O=out ARCH=arm64 CC=clang LD=ld.lld AR=llvm-ar AS=llvm-as NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_COMPAT=arm-linux-androideabi- CLANG_TRIPLE=aarch64-linux-gnu-"
-          $M vendor/ginkgo-perf_defconfig
-          C="scripts/config --file out/.config"
+          git clone -b legacy-susfs https://github.com/Frenzy169/KernelSU-Next KernelSU-Next
+          (cd drivers && ln -sf ../KernelSU-Next/kernel kernelsu)
+          grep -q kernelsu drivers/Makefile || printf "\nobj-\$(CONFIG_KSU) += kernelsu/\n" >> drivers/Makefile
+          grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig || sed -i '/endmenu/i\source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+          D=arch/arm64/configs/${DEFCONFIG}
+          sed -i 's/CONFIG_KSU=n/CONFIG_KSU=y/; s/CONFIG_KSU_MANUAL_HOOK=n/CONFIG_KSU_MANUAL_HOOK=y/' $D
 
-          # KernelSU-Next + SuSFS, manual hooks (exactly like Kazuya)
-          $C -e KSU -e KSU_MANUAL_HOOK -e KSU_SUSFS -d KSU_KPROBES_HOOK
-
-          if [ "${{ inputs.modules }}" = "true" ]; then
-            # Loadable modules with no restrictions
-            $C -e MODULES -e MODULE_UNLOAD -e MODULE_FORCE_LOAD -e MODULE_FORCE_UNLOAD
-            $C -d MODVERSIONS -d MODULE_SIG -d MODULE_SIG_FORCE -d MODULE_SIG_ALL
+      - name: Configure (${{ matrix.variant }})
+        working-directory: kernel
+        run: |
+          TC="$GITHUB_WORKSPACE/toolchain"
+          export PATH="$TC/clang/bin:$TC/aarch64-linux-android-4.9/bin:$TC/arm-linux-androideabi-4.9/bin:$PATH"
+          export KBUILD_BUILD_USER=Frenzy KBUILD_BUILD_HOST=KazuyaProject
+          MK="make O=out ARCH=arm64 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_COMPAT=arm-linux-androideabi- CLANG_TRIPLE=aarch64-linux-gnu-"
+          echo "MK=$MK" >> $GITHUB_ENV
+          mkdir -p out
+          $MK $DEFCONFIG
+          cp out/.config ../config.before
+          case "${{ matrix.variant }}" in
+            2-modules|3-modules-kprobes)
+              scripts/config --file out/.config \
+                -e MODULES -e MODULE_UNLOAD -e UNUSED_SYMBOLS \
+                -d MODULE_SIG -d MODULE_SIG_FORCE -d TRIM_UNUSED_KSYMS -d SECURITY_LOCKDOWN_LSM
+              ;;
+          esac
+          if [ "${{ matrix.variant }}" = "3-modules-kprobes" ]; then
+            scripts/config --file out/.config -e KPROBES
           fi
-
-          if [ "${{ inputs.kprobes }}" = "true" ]; then
-            $C -e KALLSYMS -e KALLSYMS_ALL
-            $C -e KPROBES -e KRETPROBES -e KPROBE_EVENTS
-            $C -e OPTPROBES
-          fi
-
-          $M olddefconfig
-          grep -E "^CONFIG_(LTO_CLANG|THINLTO|CFI_CLANG|MODULES|MODULE_UNLOAD|MODULE_FORCE_LOAD|MODVERSIONS|MODULE_SIG|KPROBES|KRETPROBES|KPROBE_EVENTS|KALLSYMS|KALLSYMS_ALL|KSU|KSU_MANUAL_HOOK|KSU_KPROBES_HOOK|KSU_SUSFS|LOCALVERSION)=" out/.config || true
-          grep -q "^CONFIG_KSU=y" out/.config
-          grep -q "^CONFIG_KSU_MANUAL_HOOK=y" out/.config
-          grep -q "^CONFIG_KSU_SUSFS=y" out/.config
-          if [ "${{ inputs.modules }}" = "true" ]; then
-            grep -q "^CONFIG_MODULES=y" out/.config
-            ! grep -q "^CONFIG_MODULE_SIG_FORCE=y" out/.config
-            ! grep -q "^CONFIG_MODVERSIONS=y" out/.config
-          fi
-          if [ "${{ inputs.kprobes }}" = "true" ]; then
-            grep -q "^CONFIG_KPROBES=y" out/.config
-          fi
+          $MK olddefconfig
+          cp out/.config ../config.after
+          diff <(grep -v '^#' ../config.before | sort) <(grep -v '^#' out/.config | sort) || true
 
       - name: Build
+        working-directory: kernel
         run: |
-          export PATH="$HOME/clang/bin:$HOME/gcc64/bin:$HOME/gcc32/bin:$PATH"
-          export LD_LIBRARY_PATH="$HOME/clang/lib:$LD_LIBRARY_PATH"
-          export KBUILD_BUILD_USER="Frenzy"
-          export KBUILD_BUILD_HOST="KazuyaProject"
-          make -j"$(nproc)" O=out ARCH=arm64 CC=clang LD=ld.lld AR=llvm-ar AS=llvm-as NM=llvm-nm \
-            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
-            CROSS_COMPILE=aarch64-linux-android- CROSS_COMPILE_COMPAT=arm-linux-androideabi- \
-            CLANG_TRIPLE=aarch64-linux-gnu- Image.gz-dtb dtbo.img 2>&1 | tail -n 300
+          TC="$GITHUB_WORKSPACE/toolchain"
+          export PATH="$TC/clang/bin:$TC/aarch64-linux-android-4.9/bin:$TC/arm-linux-androideabi-4.9/bin:$PATH"
+          export KBUILD_BUILD_USER=Frenzy KBUILD_BUILD_HOST=KazuyaProject
+          export LD_LIBRARY_PATH="$TC/clang/lib:${LD_LIBRARY_PATH:-}"
+          $MK -j$(nproc) Image.gz-dtb dtbo.img 2>&1 | tee ../build.log | tail -n 40
           test -f out/arch/arm64/boot/Image.gz-dtb
-          test -f out/arch/arm64/boot/dtbo.img
 
-      # Kazuya's own AnyKernel3 (flashes dtbo too)
-      - name: Package flashable zip
+      - name: Package with AnyKernel3
         run: |
-          git clone --depth=1 https://github.com/Frenzy169/AnyKernel3 ak3
-          cp out/arch/arm64/boot/Image.gz-dtb ak3/
-          cp out/arch/arm64/boot/dtbo.img ak3/
-          cd ak3
-          zip -r9 ../Kazuya-KSUN-SuSFS-custom-ginkgo.zip * -x '*.git*' README.md '*placeholder'
+          git clone --depth=1 https://github.com/Frenzy169/AnyKernel3 AK3
+          cp kernel/out/arch/arm64/boot/Image.gz-dtb AK3/
+          cp kernel/out/arch/arm64/boot/dtbo.img AK3/
+          cd AK3 && zip -r9 "../Kazuya-Ginkgo-${{ matrix.variant }}.zip" * -x '*.git*' README.md '*placeholder'
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Kazuya-KSUN-SuSFS-custom-ginkgo
-          path: Kazuya-KSUN-SuSFS-custom-ginkgo.zip
+          name: Kazuya-Ginkgo-${{ matrix.variant }}
+          path: |
+            Kazuya-Ginkgo-${{ matrix.variant }}.zip
+            config.after
+            build.log
